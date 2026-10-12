@@ -912,6 +912,112 @@ void OutputContours( TESStesselator *tess, TESSmesh *mesh, int vertexSize )
 	}
 }
 
+/* The boundary half-edges have the interior on their left and the exterior on their right. Deleting every other edge
+* (tessMeshSetWindingNumber with keepOnlyBoundary) would leave them as face loops, but each deletion merges two faces and
+* relabels every edge of one of them, which is quadratic in the size of large unions. Instead, follow each contour in
+* place: the boundary edge after e is the first one clockwise around e's destination from e->Lnext, past the interior
+* edges a deletion would have removed (their left faces stay interior as we turn).
+*/
+static TESShalfEdge *NextBoundaryEdge( TESShalfEdge *e )
+{
+	TESShalfEdge *n = e->Lnext;
+	while ( n->Rface->inside )
+		n = n->Oprev;
+	return n;
+}
+
+static int IsBoundaryEdge( TESShalfEdge *e )
+{
+	return e->Lface->inside && !e->Rface->inside;
+}
+
+void OutputBoundaryContours( TESStesselator *tess, TESSmesh *mesh, int vertexSize )
+{
+	TESShalfEdge *e, *edge, *pair[2];
+	TESSreal *verts;
+	TESSindex *elements, *vertInds;
+	int i, startVert = 0, vertCount;
+
+	tess->vertexCount = 0;
+	tess->elementCount = 0;
+
+	/* Count, marking each contour's edges as they are visited. */
+	for ( e = mesh->eHead.next; e != &mesh->eHead; e = e->next )
+	{
+		pair[0] = e, pair[1] = e->Sym;
+		for ( i = 0; i < 2; i++ )
+		{
+			if ( pair[i]->mark || !IsBoundaryEdge( pair[i] ) ) continue;
+			edge = pair[i];
+			do
+			{
+				edge->mark = 1;
+				++tess->vertexCount;
+				edge = NextBoundaryEdge( edge );
+			}
+			while ( edge != pair[i] );
+			++tess->elementCount;
+		}
+	}
+
+	tess->elements = (TESSindex*)tess->alloc.memalloc( tess->alloc.userData,
+													  sizeof(TESSindex) * tess->elementCount * 2 );
+	if (!tess->elements)
+	{
+		tess->outOfMemory = 1;
+		return;
+	}
+
+	tess->vertices = (TESSreal*)tess->alloc.memalloc( tess->alloc.userData,
+													  sizeof(TESSreal) * tess->vertexCount * vertexSize );
+	if (!tess->vertices)
+	{
+		tess->outOfMemory = 1;
+		return;
+	}
+
+	tess->vertexIndices = (TESSindex*)tess->alloc.memalloc( tess->alloc.userData,
+														    sizeof(TESSindex) * tess->vertexCount );
+	if (!tess->vertexIndices)
+	{
+		tess->outOfMemory = 1;
+		return;
+	}
+
+	verts = tess->vertices;
+	elements = tess->elements;
+	vertInds = tess->vertexIndices;
+
+	/* Output, in the same order, clearing the marks. */
+	for ( e = mesh->eHead.next; e != &mesh->eHead; e = e->next )
+	{
+		pair[0] = e, pair[1] = e->Sym;
+		for ( i = 0; i < 2; i++ )
+		{
+			if ( pair[i]->mark != 1 ) continue;
+			vertCount = 0;
+			edge = pair[i];
+			do
+			{
+				edge->mark = 0;
+				*verts++ = edge->Org->coords[0];
+				*verts++ = edge->Org->coords[1];
+				if ( vertexSize > 2 )
+					*verts++ = edge->Org->coords[2];
+				*vertInds++ = edge->Org->idx;
+				++vertCount;
+				edge = NextBoundaryEdge( edge );
+			}
+			while ( edge != pair[i] );
+
+			elements[0] = startVert;
+			elements[1] = vertCount;
+			elements += 2;
+			startVert += vertCount;
+		}
+	}
+}
+
 void tessAddContour( TESStesselator *tess, int size, const void* vertices,
 					int stride, int numVertices )
 {
@@ -1061,7 +1167,7 @@ int tessTesselate( TESStesselator *tess, int windingRule, int elementType,
 	* Otherwise we tessellate all the regions marked "inside".
 	*/
 	if (elementType == TESS_BOUNDARY_CONTOURS) {
-		rc = tessMeshSetWindingNumber( mesh, 1, TRUE );
+		rc = 1;		/* OutputBoundaryContours walks the boundary edges in place */
 	} else {
 		rc = tessMeshTessellateInterior( mesh );
 		if (rc != 0 && tess->processCDT != 0)
@@ -1072,7 +1178,7 @@ int tessTesselate( TESStesselator *tess, int windingRule, int elementType,
 	tessMeshCheckMesh( mesh );
 
 	if (elementType == TESS_BOUNDARY_CONTOURS) {
-		OutputContours( tess, mesh, vertexSize );     /* output contours */
+		OutputBoundaryContours( tess, mesh, vertexSize );     /* output contours */
 	}
 	else
 	{
