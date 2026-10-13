@@ -46,6 +46,7 @@ struct Bucket
 struct BucketAlloc
 {
 	void *freelist;
+	unsigned char *next, *end;	/* unused items of the newest bucket, handed out in order */
 	Bucket *buckets;
 	unsigned int itemSize;
 	unsigned int bucketSize;
@@ -57,9 +58,6 @@ static int CreateBucket( struct BucketAlloc* ba )
 {
 	size_t size;
 	Bucket* bucket;
-	void* freelist;
-	unsigned char* head;
-	unsigned char* it;
 
 	// Allocate memory for the bucket
 	size = sizeof(Bucket) + ba->itemSize * ba->bucketSize;
@@ -72,21 +70,10 @@ static int CreateBucket( struct BucketAlloc* ba )
 	bucket->next = ba->buckets;
 	ba->buckets = bucket;
 
-	// Add new items to the free list.
-	freelist = ba->freelist;
-	head = (unsigned char*)bucket + sizeof(Bucket);
-	it = head + ba->itemSize * ba->bucketSize;
-	do
-	{
-		it -= ba->itemSize;
-		// Store pointer to next free item.
-		*((void**)it) = freelist;
-		// Pointer to next location containing a free item.
-		freelist = (void*)it;
-	}
-	while ( it != head );
-	// Update pointer to next location containing a free item.
-	ba->freelist = (void*)it;
+	// Hand its items out in order as they are needed, rather than threading them all onto the free list now: most
+	// tessellations use a fraction of a bucket, and touching every item costs more than the tessellation.
+	ba->next = (unsigned char*)bucket + sizeof(Bucket);
+	ba->end = ba->next + ba->itemSize * ba->bucketSize;
 
 	return 1;
 }
@@ -108,6 +95,7 @@ struct BucketAlloc* createBucketAlloc( TESSalloc* alloc, const char* name,
 		ba->itemSize = sizeof(void*);
 	ba->bucketSize = bucketSize;
 	ba->freelist = 0;
+	ba->next = ba->end = 0;
 	ba->buckets = 0;
 
 	if ( !CreateBucket( ba ) )
@@ -123,16 +111,19 @@ void* bucketAlloc( struct BucketAlloc *ba )
 {
 	void *it;
 
-	// If running out of memory, allocate new bucket and update the freelist.
-	if ( !ba->freelist || !NextFreeItem( ba ) )
+	// Reuse a freed item first.
+	if ( ba->freelist )
 	{
-		if ( !CreateBucket( ba ) )
-			return 0;
+		it = ba->freelist;
+		ba->freelist = NextFreeItem( ba );
+		return it;
 	}
 
-	// Pop item from in front of the free list.
-	it = ba->freelist;
-	ba->freelist = NextFreeItem( ba );
+	// Else take the newest bucket's next unused item, allocating a new bucket when it runs out.
+	if ( ba->next == ba->end && !CreateBucket( ba ) )
+		return 0;
+	it = ba->next;
+	ba->next += ba->itemSize;
 
 	return it;
 }

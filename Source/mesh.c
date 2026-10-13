@@ -423,16 +423,17 @@ int tessMeshDelete( TESSmesh *mesh, TESShalfEdge *eDel )
 		KillVertex( mesh, eDel->Org, NULL );
 	} else {
 		/* Make sure that eDel->Org and eDel->Rface point to valid half-edges */
-		eDel->Rface->anEdge = eDel->Oprev;
+		TESShalfEdge *eOther = eDel->Oprev;
+		eDel->Rface->anEdge = eOther;
 		eDel->Org->anEdge = eDel->Onext;
 
-		Splice( eDel, eDel->Oprev );
+		Splice( eDel, eOther );
 		if( ! joiningLoops ) {
 			TESSface *newFace= (TESSface*)bucketAlloc( mesh->faceBucket );
 			if (newFace == NULL) return 0; 
 
-			/* We are splitting one loop into two -- create a new loop for eDel. */
-			MakeFace( newFace, eDel, eDel->Lface );
+			/* We are splitting one loop into two -- the new face is the shorter loop's. */
+			SplitFace( newFace, eDel, eOther );
 		}
 	}
 
